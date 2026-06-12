@@ -1,0 +1,230 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>KesslerEdge // Orbit Sim</title>
+    <style>
+        body { margin: 0; background: #05050a; color: #fff; font-family: monospace; overflow: hidden; }
+        #canvas-container { position: absolute; top: 0; left: 0; width: 100vw; height: 100vh; z-index: 1; }
+        #telemetry-panel { 
+            position: absolute; top: 20px; left: 20px; z-index: 10; 
+            background: rgba(10, 10, 18, 0.7); backdrop-filter: blur(8px);
+            padding: 20px; border: 1px solid #334; border-radius: 6px; width: 280px; 
+            box-shadow: 0 4px 30px rgba(0, 0, 0, 0.5);
+        }
+        h1 { font-size: 1.2rem; color: #5f9; margin: 0 0 10px 0; letter-spacing: 1px; }
+        .metric { margin: 8px 0; font-size: 0.85rem; display: flex; justify-content: space-between; }
+        .val { color: #0cf; font-weight: bold; }
+    </style>
+</head>
+<body>
+
+    <div id="canvas-container"></div>
+
+    <div id="telemetry-panel">
+        <h1>KESSLER-EDGE v2.0</h1>
+        <hr style="border: 0; border-top: 1px solid #334; margin-bottom: 15px;">
+        <div class="metric">SAT VELOCITY: <span class="val" id="sat-vel">7.67 km/s</span></div>
+        <div class="metric">ORBITAL RADIUS: <span class="val">6,778 km</span></div>
+        <div class="metric">DEBRIS IN SENSOR CONE: <span class="val" id="debris-count" style="color: #f55;">0</span></div>
+        <div class="metric">FUEL REMAINING: <span class="val" id="fuel-gauge" style="color: #fa0;">100.0%</span></div>
+        <hr style="border: 0; border-top: 1px dashed #334; margin: 15px 0;">
+        <div class="metric" style="color: #aaa;">SIMULATED HARDWARE LOAD:</div>
+        <div class="metric">CPU THREADS (PHYSICS): <span class="val" style="color: #aaa;">12%</span></div>
+        <div class="metric">NPU ACCEL (VISION): <span class="val" style="color: #aaa;">84%</span></div>
+    </div>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+
+    <script>
+        console.log("KesslerEdge Telemetry Booted.");
+
+        // 1. Core Scene Setup & Tactical Lighting
+        const scene = new THREE.Scene();
+        scene.fog = new THREE.FogExp2(0x05050a, 0.02); // Deep space depth
+        
+        const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+        
+        const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true, powerPreference: "high-performance" });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.setPixelRatio(window.devicePixelRatio);
+        document.getElementById('canvas-container').appendChild(renderer.domElement);
+
+        // Ambient and Directional Lighting for realism
+        const ambientLight = new THREE.AmbientLight(0x222244);
+        scene.add(ambientLight);
+        const sunLight = new THREE.DirectionalLight(0xffffff, 1.5);
+        sunLight.position.set(50, 20, 30);
+        scene.add(sunLight);
+
+        // 2. The Earth (High-Fidelity Grid)
+        const earthGeo = new THREE.SphereGeometry(5, 64, 64);
+        const earthMat = new THREE.MeshStandardMaterial({ 
+            color: 0x0044ff, 
+            wireframe: true,
+            transparent: true,
+            opacity: 0.15,
+            emissive: 0x001188
+        });
+        const earth = new THREE.Mesh(earthGeo, earthMat);
+        scene.add(earth);
+
+        // 3. Aegis-1 Satellite & Sensor Array
+        const satGroup = new THREE.Group();
+        
+        const satGeo = new THREE.BoxGeometry(0.3, 0.3, 0.6);
+        const satMat = new THREE.MeshStandardMaterial({ color: 0xffaa00, metalness: 0.8, roughness: 0.2 });
+        const satellite = new THREE.Mesh(satGeo, satMat);
+        satGroup.add(satellite);
+
+        // Volumetric Radar Scanner Cone
+        const coneGeo = new THREE.ConeGeometry(3.5, 8, 32);
+        const coneMat = new THREE.MeshBasicMaterial({ 
+            color: 0x00ffff, 
+            transparent: true, 
+            opacity: 0.08,
+            blending: THREE.AdditiveBlending,
+            depthWrite: false
+        });
+        const sensorCone = new THREE.Mesh(coneGeo, coneMat);
+        sensorCone.rotation.x = Math.PI / 2; 
+        sensorCone.position.z = 4; // Projects out in front of the satellite
+        satGroup.add(sensorCone);
+        
+        scene.add(satGroup);
+
+        // 4. HIGH-PERFORMANCE DEBRIS PARTICLE SYSTEM (BufferGeometry)
+        const debrisCount = 3500; 
+        const debrisGeo = new THREE.BufferGeometry();
+        const debrisPositions = new Float32Array(debrisCount * 3);
+        const debrisVelocities = [];
+
+        for (let i = 0; i < debrisCount; i++) {
+            const radius = 5.5 + Math.random() * 8; 
+            const u = Math.random();
+            const v = Math.random();
+            const thetaVal = u * 2.0 * Math.PI;
+            const phiVal = Math.acos(2.0 * v - 1.0);
+            
+            // X, Y, Z coordinates
+            debrisPositions[i * 3] = radius * Math.sin(phiVal) * Math.cos(thetaVal);
+            debrisPositions[i * 3 + 1] = radius * Math.sin(phiVal) * Math.sin(thetaVal);
+            debrisPositions[i * 3 + 2] = radius * Math.cos(phiVal);
+            
+            // XYZ Drift Vectors
+            debrisVelocities.push(new THREE.Vector3(
+                (Math.random() - 0.5) * 0.02,
+                (Math.random() - 0.5) * 0.02,
+                (Math.random() - 0.5) * 0.02
+            ));
+        }
+
+        debrisGeo.setAttribute('position', new THREE.BufferAttribute(debrisPositions, 3));
+        
+        const debrisPointsMat = new THREE.PointsMaterial({
+            color: 0xff3333,
+            size: 0.08,
+            transparent: true,
+            opacity: 0.8,
+            blending: THREE.AdditiveBlending
+        });
+        
+        const debrisSystem = new THREE.Points(debrisGeo, debrisPointsMat);
+        scene.add(debrisSystem);
+
+        camera.position.set(0, 8, 18);
+        camera.lookAt(0, 0, 0);
+
+        // Orbital Variables
+        const orbitalAltitude = 8.5; 
+        let theta = 0; 
+        const orbitalSpeed = 0.015; 
+
+        // Dashboard Links
+        const velocityDisplay = document.getElementById('sat-vel');
+        const cpuDisplay = document.querySelectorAll('.val')[4]; 
+        const npuDisplay = document.querySelectorAll('.val')[5];
+        const debrisCountDisplay = document.getElementById('debris-count');
+
+        // 5. The Advanced Kinematic Engine
+        function animate() {
+            requestAnimationFrame(animate);
+
+            earth.rotation.y += 0.0005;
+            earth.rotation.z += 0.0001;
+
+            // Update Trajectory
+            theta += orbitalSpeed;
+            satGroup.position.x = Math.cos(theta) * orbitalAltitude;
+            satGroup.position.z = Math.sin(theta) * orbitalAltitude;
+            satGroup.position.y = Math.sin(theta * 0.8) * 1.5; 
+
+            // Make the satellite orient toward its flight path
+            const nextX = Math.cos(theta + 0.01) * orbitalAltitude;
+            const nextZ = Math.sin(theta + 0.01) * orbitalAltitude;
+            const nextY = Math.sin((theta + 0.01) * 0.8) * 1.5;
+            satGroup.lookAt(nextX, nextY, nextZ);
+
+            // Buffer Data Updates
+            let detectedInScanner = 0;
+            const positions = debrisSystem.geometry.attributes.position.array;
+
+            for (let i = 0; i < debrisCount; i++) {
+                const idx = i * 3;
+                
+                // Physical Drift
+                positions[idx] += debrisVelocities[i].x;
+                positions[idx + 1] += debrisVelocities[i].y;
+                positions[idx + 2] += debrisVelocities[i].z;
+
+                const dx = positions[idx];
+                const dy = positions[idx + 1];
+                const dz = positions[idx + 2];
+
+                // Orbital bounds checking
+                const distFromCenter = Math.sqrt(dx*dx + dy*dy + dz*dz);
+                if (distFromCenter > 14 || distFromCenter < 5.1) {
+                    debrisVelocities[i].multiplyScalar(-1);
+                }
+
+                // Proximity Scanner Logic (Raw Euclidean Math for speed)
+                const satDx = satGroup.position.x - dx;
+                const satDy = satGroup.position.y - dy;
+                const satDz = satGroup.position.z - dz;
+                const distToSat = Math.sqrt(satDx*satDx + satDy*satDy + satDz*satDz);
+
+                if (distToSat < 4.5) {
+                    detectedInScanner++;
+                }
+            }
+
+            // Flag the GPU that the point array has changed
+            debrisSystem.geometry.attributes.position.needsUpdate = true;
+
+            // Live UI Updates
+            let jitterVel = (7.67 + (Math.random() * 0.05 - 0.02)).toFixed(2);
+            velocityDisplay.innerText = jitterVel + " km/s";
+            
+            let cpuLoad = Math.floor(12 + Math.random() * 4);
+            cpuDisplay.innerText = cpuLoad + "%";
+
+            debrisCountDisplay.innerText = detectedInScanner;
+            
+            // Dynamically scale NPU simulated load based on the density of the debris cloud
+            let targetNpuLoad = detectedInScanner > 0 ? Math.floor(70 + (detectedInScanner * 0.6) + Math.random() * 10) : Math.floor(8 + Math.random() * 3);
+            if(targetNpuLoad > 100) targetNpuLoad = 100;
+            npuDisplay.innerText = targetNpuLoad + "%";
+
+            renderer.render(scene, camera);
+        }
+
+        window.addEventListener('resize', () => {
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+        });
+
+        animate();
+    </script>
+</body>
+</html>
